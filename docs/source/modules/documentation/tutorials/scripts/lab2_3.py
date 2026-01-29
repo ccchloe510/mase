@@ -65,9 +65,6 @@ from chop.tools import get_trainer
 from chop.pipelines import CompressionPipeline
 from chop import MaseGraph
 
-mg = MaseGraph(model)
-pipe = CompressionPipeline()
-
 quantization_config = {
     "by": "type",
     "default": {
@@ -104,19 +101,10 @@ pruning_config = {
     },
 }
 
-mg, _ = pipe(
-    mg,
-    pass_args={
-        "quantize_transform_pass": quantization_config,
-        "prune_transform_pass": pruning_config,
-    },
-)
-
 def objective(trial):
-
-    # Define the model
     model = construct_model(trial)
 
+    # 1️⃣ pre-train
     trainer = get_trainer(
         model=model,
         tokenized_dataset=dataset,
@@ -124,18 +112,47 @@ def objective(trial):
         evaluate_metric="accuracy",
         num_train_epochs=1,
     )
+    trainer.train() 
 
-    trainer.train()
+    # Move model to CPU before passing to MaseGraph and CompressionPipeline
+    # to avoid device mismatch issues during internal pipeline operations.
+    model_on_cpu = model.cpu()
+
+    mg = MaseGraph(
+        model_on_cpu,
+        hf_input_names=[
+            "input_ids",
+            "attention_mask",
+            "labels",
+        ],
+    )
+    pipe = CompressionPipeline()
+
+    mg, _ = pipe(
+        mg,
+        pass_args={
+            "quantize_transform_pass": quantization_config,
+            "prune_transform_pass": pruning_config,
+        },
+    )
+
+    compressed_model = mg.model 
+
+    trainer = get_trainer(
+        model=compressed_model,
+        tokenized_dataset=dataset,
+        tokenizer=tokenizer,
+        evaluate_metric="accuracy",
+        num_train_epochs=0
+    )
     eval_results = trainer.evaluate()
-
-    # Set the model as an attribute so we can fetch it later
-    trial.set_user_attr("model", model)
+    #trial.set_user_attr("model", compressed_model)
 
     return eval_results["eval_accuracy"]
 
 from optuna.samplers import GridSampler, RandomSampler, TPESampler
 
-sampler = GridSampler()
+sampler = TPESampler()
 
 import optuna
 
@@ -151,11 +168,7 @@ study.optimize(
     timeout=60 * 60 * 24,
 )
 
-from pathlib import Path
-import dill
-
-model = study.best_trial.user_attrs["model"].cpu()
-
-with open(f"{Path.home()}/tutorial_5_best_model.pkl", "wb") as f:
-    dill.dump(model, f)
+df = study.trials_dataframe()
+df.to_csv("results_compress_no_retrain.csv", index=False)
+print("Compress Only saved results_compress_no_retrain.csv")
 

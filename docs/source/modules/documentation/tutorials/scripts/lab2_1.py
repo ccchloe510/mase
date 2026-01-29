@@ -98,7 +98,7 @@ study = optuna.create_study(
 
 study.optimize(
     objective,
-    n_trials=1,
+    n_trials=10,
     timeout=60 * 60 * 24,
 )
 
