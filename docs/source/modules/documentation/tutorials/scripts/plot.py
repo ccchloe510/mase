@@ -14,20 +14,20 @@ def get_best_curve(filename):
         return []
 
 # 读取三条曲线
-#y1 = get_best_curve("results_baseline.csv")
+y1 = get_best_curve("results_baseline.csv")
 y2 = get_best_curve("results_compress_no_retrain.csv")
-# y3 = get_best_curve("results_compress_retrain.csv")
+y3 = get_best_curve("results_compress_retrain.csv")
 
 # 确定 X 轴 (以最短的那个为准，防止画图报错)
-min_len = min(len(y2), len(y2), len(y2))
+min_len = min(len(y1), len(y2), len(y3))
 x = range(1, min_len + 1)
 
 # 画图
 plt.figure(figsize=(10, 6))
 
-#plt.plot(x, y1[:min_len], label="Task 1: Baseline (No Compression)", marker="o", linestyle="-")
+plt.plot(x, y1[:min_len], label="Task 1: Baseline (No Compression)", marker="o", linestyle="-")
 plt.plot(x, y2[:min_len], label="Task 2: Compress Only (No Retrain)", marker="x", linestyle="--")
-# plt.plot(x, y3[:min_len], label="Task 2: Compress + Retrain", marker="^", linestyle="-.")
+plt.plot(x, y3[:min_len], label="Task 2: Compress + Retrain", marker="^", linestyle="-.")
 
 plt.xlabel("Number of Trials")
 plt.ylabel("Max Accuracy Achieved")

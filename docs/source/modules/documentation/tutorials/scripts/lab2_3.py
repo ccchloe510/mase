@@ -10,8 +10,11 @@ dataset, tokenizer = get_tokenized_dataset(
     return_tokenizer=True,
 )
 
+import torch
+import gc
 import torch.nn as nn
 from chop.nn.modules import Identity
+import copy
 
 search_space = {
     "num_layers": [2, 4, 8],
@@ -102,53 +105,64 @@ pruning_config = {
 }
 
 def objective(trial):
-    model = construct_model(trial)
+    current_quant_config = copy.deepcopy(quantization_config)
+    current_prune_config = copy.deepcopy(pruning_config)
+    print(f"\n [Trial {trial.number}] Started...")
 
-    # 1️⃣ pre-train
-    trainer = get_trainer(
+    model = construct_model(trial)
+    
+    trainer_pre = get_trainer(
         model=model,
         tokenized_dataset=dataset,
         tokenizer=tokenizer,
         evaluate_metric="accuracy",
         num_train_epochs=1,
     )
-    trainer.train() 
+    trainer_pre.train() 
+    
+    pre_eval_results = trainer_pre.evaluate()
+    acc_pre = pre_eval_results["eval_accuracy"]
+    trial.set_user_attr("accuracy_pre_compress", acc_pre)
+    print(f"Pre-compression Acc: {acc_pre:.4f}")
 
-    # Move model to CPU before passing to MaseGraph and CompressionPipeline
-    # to avoid device mismatch issues during internal pipeline operations.
+    del trainer_pre
+    torch.cuda.empty_cache()
+
+    # 2. Compress (Move to CPU)
     model_on_cpu = model.cpu()
-
+    
     mg = MaseGraph(
         model_on_cpu,
-        hf_input_names=[
-            "input_ids",
-            "attention_mask",
-            "labels",
-        ],
+        hf_input_names=["input_ids", "attention_mask", "labels"],
     )
     pipe = CompressionPipeline()
 
     mg, _ = pipe(
         mg,
         pass_args={
-            "quantize_transform_pass": quantization_config,
-            "prune_transform_pass": pruning_config,
+            "quantize_transform_pass": current_quant_config,
+            "prune_transform_pass": current_prune_config,
         },
     )
-
     compressed_model = mg.model 
 
-    trainer = get_trainer(
+    trainer_eval = get_trainer(
         model=compressed_model,
         tokenized_dataset=dataset,
         tokenizer=tokenizer,
         evaluate_metric="accuracy",
-        num_train_epochs=0
+        num_train_epochs=0 
     )
-    eval_results = trainer.evaluate()
-    #trial.set_user_attr("model", compressed_model)
+    eval_results = trainer_eval.evaluate()
+    acc_post = eval_results["eval_accuracy"]
+    
+    print(f"[Trial {trial.number}] Finished | Post-Acc: {acc_post:.4f} (Drop: {acc_pre - acc_post:.4f})")
+    
+    del model, model_on_cpu, trainer_eval, compressed_model, mg
+    gc.collect()
+    torch.cuda.empty_cache()
 
-    return eval_results["eval_accuracy"]
+    return acc_post
 
 from optuna.samplers import GridSampler, RandomSampler, TPESampler
 
@@ -164,7 +178,7 @@ study = optuna.create_study(
 
 study.optimize(
     objective,
-    n_trials=1,
+    n_trials=30,
     timeout=60 * 60 * 24,
 )
 

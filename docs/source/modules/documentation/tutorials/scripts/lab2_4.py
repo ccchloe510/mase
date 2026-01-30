@@ -12,6 +12,9 @@ dataset, tokenizer = get_tokenized_dataset(
 
 import torch.nn as nn
 from chop.nn.modules import Identity
+import torch
+import gc
+import copy
 
 search_space = {
     "num_layers": [2, 4, 8],
@@ -65,9 +68,6 @@ from chop.tools import get_trainer
 from chop.pipelines import CompressionPipeline
 from chop import MaseGraph
 
-mg = MaseGraph(model)
-pipe = CompressionPipeline()
-
 quantization_config = {
     "by": "type",
     "default": {
@@ -104,38 +104,72 @@ pruning_config = {
     },
 }
 
-mg, _ = pipe(
-    mg,
-    pass_args={
-        "quantize_transform_pass": quantization_config,
-        "prune_transform_pass": pruning_config,
-    },
-)
-
 def objective(trial):
+    current_quant_config = copy.deepcopy(quantization_config)
+    current_prune_config = copy.deepcopy(pruning_config)
+    print(f"\n [Trial {trial.number}] Started...")
 
-    # Define the model
     model = construct_model(trial)
-
-    trainer = get_trainer(
+    
+    trainer_pre = get_trainer(
         model=model,
         tokenized_dataset=dataset,
         tokenizer=tokenizer,
         evaluate_metric="accuracy",
         num_train_epochs=1,
     )
+    trainer_pre.train() 
+    
+    pre_eval_results = trainer_pre.evaluate()
+    acc_pre = pre_eval_results["eval_accuracy"]
+    trial.set_user_attr("accuracy_pre_compress", acc_pre)
+    print(f"Pre-compression Acc: {acc_pre:.4f}")
 
-    trainer.train()
-    eval_results = trainer.evaluate()
+    del trainer_pre
+    torch.cuda.empty_cache()
 
-    # Set the model as an attribute so we can fetch it later
-    trial.set_user_attr("model", model)
+    # 2. Compress (Move to CPU)
+    model_on_cpu = model.cpu()
+    
+    mg = MaseGraph(
+        model_on_cpu,
+        hf_input_names=["input_ids", "attention_mask", "labels"],
+    )
+    pipe = CompressionPipeline()
 
-    return eval_results["eval_accuracy"]
+    mg, _ = pipe(
+        mg,
+        pass_args={
+            "quantize_transform_pass": current_quant_config,
+            "prune_transform_pass": current_prune_config,
+        },
+    )
+    compressed_model = mg.model 
+
+    trainer_retrain = get_trainer(
+        model=compressed_model,
+        tokenized_dataset=dataset,
+        tokenizer=tokenizer,
+        evaluate_metric="accuracy",
+        num_train_epochs=1 
+    )
+
+    trainer_retrain.train()
+
+    eval_results = trainer_retrain.evaluate()
+    acc_post = eval_results["eval_accuracy"]
+    
+    print(f"[Trial {trial.number}] Finished | Post-Acc: {acc_post:.4f} (Drop: {acc_pre - acc_post:.4f})")
+    
+    del model, model_on_cpu, trainer_retrain, compressed_model, mg
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    return acc_post
 
 from optuna.samplers import GridSampler, RandomSampler, TPESampler
 
-sampler = GridSampler()
+sampler = TPESampler()
 
 import optuna
 
@@ -147,15 +181,19 @@ study = optuna.create_study(
 
 study.optimize(
     objective,
-    n_trials=1,
+    n_trials=30,
     timeout=60 * 60 * 24,
 )
 
-from pathlib import Path
-import dill
+# from pathlib import Path
+# import dill
 
-model = study.best_trial.user_attrs["model"].cpu()
+# model = study.best_trial.user_attrs["model"].cpu()
 
-with open(f"{Path.home()}/tutorial_5_best_model.pkl", "wb") as f:
-    dill.dump(model, f)
+# with open(f"{Path.home()}/tutorial_5_best_model.pkl", "wb") as f:
+#     dill.dump(model, f)
+
+df = study.trials_dataframe()
+df.to_csv("results_compress_retrain.csv", index=False)
+print("Compress with retrain saved results_compress_retrain.csv")
 

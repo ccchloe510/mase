@@ -98,15 +98,22 @@ study = optuna.create_study(
 
 study.optimize(
     objective,
-    n_trials=10,
+    n_trials=30,
     timeout=60 * 60 * 24,
 )
 
 from pathlib import Path
 import dill
+import pandas as pd
+
+df = study.trials_dataframe()
+
+df.to_csv("results_baseline.csv", index=False)
+print("Baseline saved to results_baseline.csv")
 
 model = study.best_trial.user_attrs["model"].cpu()
 
 with open(f"{Path.home()}/tutorial_5_best_model.pkl", "wb") as f:
     dill.dump(model, f)
+
 
